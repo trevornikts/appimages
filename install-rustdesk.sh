@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
 # Install the RustDesk client on Astra Linux / Debian-like systems.
 #
 #   As root (sudo):   .deb package, systemd service, permanent password, ID.
@@ -19,9 +18,6 @@
 #   RUSTDESK_LOG=...            log file (default: /var/log/rustdesk-install.log as root,
 #                               ~/.local/state/rustdesk-install.log as a user)
 # User mode: run it inside the graphical session of the user you want to connect to.
-=======
-
->>>>>>> e5cfbe79cb0124e8fff7b3d957aea534c950749f
 set -euo pipefail
 
 CURL=(curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors)
@@ -143,6 +139,15 @@ install_root() {
   done
   [ -n "$set_ok" ] || { echo "Could not store the permanent password (check: systemctl status rustdesk)." >&2; return 1; }
 
+  # The public server can assign a new ID right after the first registration; read it again.
+  sleep 10
+  local id2
+  id2="$(rustdesk --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
+  if [[ "$id2" =~ ^[0-9]+$ ]] && [ "$id2" != "$rd_id" ]; then
+    echo "The ID was updated by the server: $rd_id -> $id2"
+    rd_id="$id2"
+  fi
+
   printf 'ID: %s\nPassword: %s\n' "$rd_id" "$password" > "$CRED_FILE"
   echo "RustDesk ${VERSION} installed (root mode), ID: $rd_id"
 }
@@ -240,7 +245,24 @@ EOF
     echo "         Run the script again inside the desktop session or set RUSTDESK_DISPLAY=:N." >&2
   fi
 
+  # Right after the first registration the public server can assign a new ID (UUID_MISMATCH),
+  # so read the ID again once the server has had time to register.
+  sleep 10
+  local id2
+  id2="$("$bin" --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
+  if [[ "$id2" =~ ^[0-9]+$ ]] && [ "$id2" != "$rd_id" ]; then
+    echo "The ID was updated by the server: $rd_id -> $id2"
+    rd_id="$id2"
+  fi
+
   printf 'ID: %s\n%s\n' "$rd_id" "$note" > "$CRED_FILE"
+  if [ ! -s /var/lib/dbus/machine-id ]; then
+    # Shown in the final summary too: without this the ID is not registered and nobody can connect.
+    printf '%s\n%s\n%s\n' \
+      "WARNING: this ID will NOT accept connections yet (/var/lib/dbus/machine-id is empty)." \
+      "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" \
+      "         then run this script again (the ID may change)." >> "$CRED_FILE"
+  fi
   echo "RustDesk ${VERSION} installed (portable, user mode) in $base, ID: $rd_id"
   echo "RustDesk window: $bin"
 }
