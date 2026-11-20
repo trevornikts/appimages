@@ -14,6 +14,7 @@
 #                               rustdesk-x86_64.deb / rustdesk-aarch64.deb (root mode),
 #                               rustdesk-x86_64.AppImage (user mode) and, optionally, SHA256SUMS
 #   RUSTDESK_DIR=...            user mode: install directory (default: ~/.local/share/rustdesk-portable)
+#   RUSTDESK_DISPLAY=:0         user mode: X display of the graphical session (default: auto-detected)
 #   RUSTDESK_LOG=...            log file (default: /var/log/rustdesk-install.log as root,
 #                               ~/.local/state/rustdesk-install.log as a user)
 # User mode: run it inside the graphical session of the user you want to connect to.
@@ -153,6 +154,8 @@ install_user() {
   download rustdesk.AppImage rustdesk-x86_64.AppImage x86_64.AppImage
 
   step "Extracting the AppImage"
+  # A server left over from a previous run runs from the directory we are about to replace.
+  pkill -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" 2>/dev/null && sleep 1 || true
   chmod +x rustdesk.AppImage
   rm -rf squashfs-root
   ./rustdesk.AppImage --appimage-extract >/dev/null
@@ -163,7 +166,27 @@ install_user() {
     echo "WARNING: /var/lib/dbus/machine-id is empty or missing. Without it the ID will not be registered." >&2
     echo "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" >&2
   fi
-  [ -n "${DISPLAY:-}" ] || echo "WARNING: DISPLAY is not set, run this script inside a graphical session." >&2
+
+  # RustDesk needs the X display of the graphical session. When the script runs without one
+  # (for example over ssh), look for the session of this user: RUSTDESK_DISPLAY, then `who`,
+  # then the first X socket.
+  local disp="${RUSTDESK_DISPLAY:-${DISPLAY:-}}" sock
+  if [ -z "$disp" ]; then
+    disp="$(who 2>/dev/null | awk -v u="$(id -un)" '$1==u && $2 ~ /^:[0-9]+$/ {print $2; exit}')" || true
+  fi
+  if [ -z "$disp" ]; then
+    for sock in /tmp/.X11-unix/X*; do
+      [ -S "$sock" ] && { disp=":${sock##*/X}"; break; }
+    done
+  fi
+  if [ -n "$disp" ]; then
+    echo "Using the graphical session DISPLAY=$disp"
+    export DISPLAY="$disp"
+    [ -n "${XAUTHORITY:-}" ] || [ ! -f "$HOME/.Xauthority" ] || export XAUTHORITY="$HOME/.Xauthority"
+  else
+    echo "WARNING: no graphical session found. The server starts, but the screen cannot be shared" >&2
+    echo "         until you log in to the desktop (the autostart entry will start it then)." >&2
+  fi
 
   step "Adding autostart and starting the server"
   # Not named rustdesk.desktop: RustDesk deletes that file itself on every --server start.
@@ -175,7 +198,8 @@ Name=RustDesk
 Exec=$bin --server
 X-GNOME-Autostart-enabled=true
 EOF
-  if ! pgrep -u "$(id -u)" -f 'rustdesk --server' >/dev/null; then
+  # setsid + nohup: the server keeps running in the background after the terminal or ssh session closes.
+  if ! pgrep -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" >/dev/null; then
     nohup setsid "$bin" --server >"$base/server.log" 2>&1 &
   fi
 
@@ -196,6 +220,20 @@ EOF
     else
       echo "RustDesk refused to set the password without root."
     fi
+  fi
+
+  step "Checking that the server is running"
+  sleep 5
+  local pid
+  pid="$(pgrep -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" | head -n1 || true)"
+  if [ -z "$pid" ]; then
+    echo "ERROR: the RustDesk server is not running (see $base/server.log)." >&2
+    return 1
+  fi
+  echo "RustDesk server is running in the background (PID $pid, DISPLAY=${DISPLAY:-none})."
+  if grep -q 'cannot open display' "$base/server.log" 2>/dev/null; then
+    echo "WARNING: RustDesk cannot open the display ${DISPLAY:-}; the screen will not be shared." >&2
+    echo "         Run the script again inside the desktop session or set RUSTDESK_DISPLAY=:N." >&2
   fi
 
   printf 'ID: %s\n%s\n' "$rd_id" "$note" > "$CRED_FILE"
