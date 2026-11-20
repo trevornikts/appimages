@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+<<<<<<< HEAD
 # Install the RustDesk client on Astra Linux / Debian-like systems.
 #
 #   As root (sudo):   .deb package, systemd service, permanent password, ID.
@@ -18,6 +19,9 @@
 #   RUSTDESK_LOG=...            log file (default: /var/log/rustdesk-install.log as root,
 #                               ~/.local/state/rustdesk-install.log as a user)
 # User mode: run it inside the graphical session of the user you want to connect to.
+=======
+
+>>>>>>> e5cfbe79cb0124e8fff7b3d957aea534c950749f
 set -euo pipefail
 
 CURL=(curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors)
