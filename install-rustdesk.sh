@@ -1,26 +1,5 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
-# Install the RustDesk client on Astra Linux / Debian-like systems.
-#
-#   As root (sudo):   .deb package, systemd service, permanent password, ID.
-#   As a regular user: portable AppImage in ~/.local/share/rustdesk-portable, autostart entry, ID.
-#                      RustDesk does not allow setting the permanent password without root.
-#
-# Usage: bash install-rustdesk.sh
-# Variables (optional):
-#   RUSTDESK_VERSION=1.5.3      version to install (default: latest GitHub release)
-#   RUSTDESK_PASSWORD=...       permanent password (root mode; default: random)
-#   RUSTDESK_BASE_URL=https://your-server/rustdesk
-#                               fetch files from your server instead of GitHub. Expects
-#                               rustdesk-x86_64.deb / rustdesk-aarch64.deb (root mode),
-#                               rustdesk-x86_64.AppImage (user mode) and, optionally, SHA256SUMS
-#   RUSTDESK_DIR=...            user mode: install directory (default: ~/.local/share/rustdesk-portable)
-#   RUSTDESK_DISPLAY=:0         user mode: X display of the graphical session (default: auto-detected)
-#   RUSTDESK_LOG=...            log file (default: /var/log/rustdesk-install.log as root,
-#                               ~/.local/state/rustdesk-install.log as a user)
-# User mode: run it inside the graphical session of the user you want to connect to.
-=======
->>>>>>> 4a051f37678a951f5a9e1e293bb39e37e22f7d27
+
 set -euo pipefail
 
 CURL=(curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors)
