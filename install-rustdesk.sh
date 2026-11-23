@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-<<<<<<< HEAD
 # Install the RustDesk client on Astra Linux / Debian-like systems.
 #
 #   As root (sudo):   .deb package, systemd service, permanent password, ID.
-#   As a regular user: portable AppImage in ~/.local/share/rustdesk-portable, autostart entry, ID.
-#                      RustDesk does not allow setting the permanent password without root.
+#   As a regular user: portable AppImage in ~/.local/share/rustdesk-portable, autostart entry, ID,
+#                      permanent password. `rustdesk --password` is refused to non-root users, so the
+#                      password is written straight into ~/.config/rustdesk/RustDesk.toml (RustDesk
+#                      reads it as is; verified with a real connection).
 #
 # Usage: bash install-rustdesk.sh
 # Variables (optional):
 #   RUSTDESK_VERSION=1.5.3      version to install (default: latest GitHub release)
-#   RUSTDESK_PASSWORD=...       permanent password (root mode; default: random)
+#   RUSTDESK_PASSWORD=...       permanent password (default: random; no single quotes)
 #   RUSTDESK_BASE_URL=https://your-server/rustdesk
 #                               fetch files from your server instead of GitHub. Expects
 #                               rustdesk-x86_64.deb / rustdesk-aarch64.deb (root mode),
@@ -19,8 +20,6 @@
 #   RUSTDESK_LOG=...            log file (default: /var/log/rustdesk-install.log as root,
 #                               ~/.local/state/rustdesk-install.log as a user)
 # User mode: run it inside the graphical session of the user you want to connect to.
-=======
->>>>>>> 4a051f37678a951f5a9e1e293bb39e37e22f7d27
 set -euo pipefail
 
 CURL=(curl -fsSL --retry 8 --retry-delay 3 --retry-all-errors)
@@ -82,6 +81,45 @@ download() {
     echo "Downloading $url"
     "${CURL[@]}" -o "$out" "$url"
   fi
+}
+
+# --- user mode helpers -------------------------------------------------------------------------
+
+# Stop the portable server (systemd user unit and plain processes).
+stop_server() {
+  systemctl --user stop rustdesk-portable.service >/dev/null 2>&1 || true
+  pkill -u "$(id -u)" -f "$1/squashfs-root/.*rustdesk --" 2>/dev/null || true
+  sleep 2
+}
+
+# Start the portable server in the background. A transient systemd user unit is preferred: when the
+# script runs over ssh, logind kills every process of the session at logout, even setsid ones.
+start_server() {
+  local bin="$1" base="$2" envs=()
+  [ -z "${DISPLAY:-}" ] || envs+=(-E "DISPLAY=$DISPLAY")
+  [ -z "${XAUTHORITY:-}" ] || envs+=(-E "XAUTHORITY=$XAUTHORITY")
+  if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --quiet --collect \
+      --unit=rustdesk-portable -p "StandardOutput=append:$base/server.log" \
+      -p "StandardError=append:$base/server.log" ${envs[@]+"${envs[@]}"} "$bin" --server >/dev/null 2>&1; then
+    echo "Server started as the systemd user unit rustdesk-portable (survives logout)."
+  else
+    nohup setsid "$bin" --server >"$base/server.log" 2>&1 </dev/null &
+    echo "Server started with nohup setsid (it may stop when this login session ends)."
+  fi
+}
+
+# Write the permanent password into RustDesk.toml. The server must be stopped: a running server
+# keeps its own copy of the config and would overwrite the file.
+set_config_password() {
+  local cfg="$1" pw="$2" tmp
+  tmp="$(mktemp)"
+  if grep -q '^password = ' "$cfg"; then
+    PW="$pw" awk -v q="'" '/^password = / && !done { print "password = " q ENVIRON["PW"] q; done=1; next } { print }' "$cfg" > "$tmp"
+  else
+    { printf "password = '%s'\n" "$pw"; cat "$cfg"; } > "$tmp"
+  fi
+  cat "$tmp" > "$cfg"   # keeps the owner and mode of the file
+  rm -f "$tmp"
 }
 
 install_root() {
@@ -167,7 +205,7 @@ install_user() {
 
   step "Extracting the AppImage"
   # A server left over from a previous run runs from the directory we are about to replace.
-  pkill -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" 2>/dev/null && sleep 1 || true
+  stop_server "$base"
   chmod +x rustdesk.AppImage
   rm -rf squashfs-root
   ./rustdesk.AppImage --appimage-extract >/dev/null
@@ -210,10 +248,7 @@ Name=RustDesk
 Exec=$bin --server
 X-GNOME-Autostart-enabled=true
 EOF
-  # setsid + nohup: the server keeps running in the background after the terminal or ssh session closes.
-  if ! pgrep -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" >/dev/null; then
-    nohup setsid "$bin" --server >"$base/server.log" 2>&1 &
-  fi
+  start_server "$bin" "$base"
 
   step "Getting the RustDesk ID"
   local rd_id="" i
@@ -225,14 +260,10 @@ EOF
   done
   [ -n "$rd_id" ] || { echo "Could not get the RustDesk ID (see $base/server.log)." >&2; return 1; }
 
-  local note="Set a permanent password once in the RustDesk window: Settings -> Security -> Permanent password."
-  if [ -n "${RUSTDESK_PASSWORD:-}" ]; then
-    if "$bin" --password "$RUSTDESK_PASSWORD" 2>&1 | grep -q '^Done'; then
-      note="Password: $RUSTDESK_PASSWORD"
-    else
-      echo "RustDesk refused to set the password without root."
-    fi
-  fi
+  local password="${RUSTDESK_PASSWORD:-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')}"
+  case "$password" in
+    *\'*|*[[:cntrl:]]*) echo "The password must not contain a single quote or control characters." >&2; return 1 ;;
+  esac
 
   step "Checking that the server is running"
   sleep 5
@@ -258,7 +289,19 @@ EOF
     rd_id="$id2"
   fi
 
-  printf 'ID: %s\n%s\n' "$rd_id" "$note" > "$CRED_FILE"
+  step "Setting the permanent password"
+  local cfg="$HOME/.config/rustdesk/RustDesk.toml"
+  [ -f "$cfg" ] || { echo "RustDesk config not found: $cfg" >&2; return 1; }
+  stop_server "$base"
+  set_config_password "$cfg" "$password"
+  start_server "$bin" "$base"
+  sleep 8
+  grep -q "^password = '.\+'" "$cfg" || { echo "The password is missing from $cfg after the restart." >&2; return 1; }
+  pid="$(pgrep -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" | head -n1 || true)"
+  [ -n "$pid" ] || { echo "ERROR: the RustDesk server did not come back after setting the password." >&2; return 1; }
+  echo "Permanent password stored in $cfg, server running (PID $pid)."
+
+  printf 'ID: %s\nPassword: %s\n' "$rd_id" "$password" > "$CRED_FILE"
   if [ ! -s /var/lib/dbus/machine-id ]; then
     # Shown in the final summary too: without this the ID is not registered and nobody can connect.
     printf '%s\n%s\n%s\n' \
