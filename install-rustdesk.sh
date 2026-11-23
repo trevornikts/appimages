@@ -209,15 +209,23 @@ install_user() {
       echo "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" >&2
     fi
   fi
-  cat > "$launcher" <<EOF
-#!/bin/sh
-BIN='$bin'
-if [ ! -s /var/lib/dbus/machine-id ] && [ -s /etc/machine-id ] \\
-   && unshare -Urm sh -c 'mount --bind /etc/machine-id /var/lib/dbus/machine-id' >/dev/null 2>&1; then
-  exec unshare -Urm sh -c 'mount --bind /etc/machine-id /var/lib/dbus/machine-id && exec "\$0" "\$@"' "\$BIN" "\$@"
+  {
+    printf "#!/bin/sh\nBIN='%s'\n" "$bin"
+    cat <<'EOF'
+U=$(id -u); G=$(id -g)
+MNT='mount --bind /etc/machine-id /var/lib/dbus/machine-id'
+if [ ! -s /var/lib/dbus/machine-id ] && [ -s /etc/machine-id ]; then
+  # Preferred: mount as the namespace root, then map the real uid/gid back, so RustDesk (and a
+  # terminal opened from it) still runs as this user and not as a fake root.
+  C1="$MNT && exec unshare -U --map-user=$U --map-group=$G \"\$0\" \"\$@\""
+  if unshare -Urm sh -c "$C1" true >/dev/null 2>&1; then exec unshare -Urm sh -c "$C1" "$BIN" "$@"; fi
+  # Older util-linux without --map-user: works, but the process then looks like root inside.
+  C2="$MNT && exec \"\$0\" \"\$@\""
+  if unshare -Urm sh -c "$C2" true >/dev/null 2>&1; then exec unshare -Urm sh -c "$C2" "$BIN" "$@"; fi
 fi
-exec "\$BIN" "\$@"
+exec "$BIN" "$@"
 EOF
+  } > "$launcher"
   chmod +x "$launcher"
 
   # RustDesk needs the X display of the graphical session. When the script runs without one
