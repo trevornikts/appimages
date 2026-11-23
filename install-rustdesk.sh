@@ -192,10 +192,33 @@ install_user() {
   local bin="$base/squashfs-root/AppRun"
   [ -x "$bin" ] || { echo "Extracting the AppImage failed." >&2; return 1; }
 
+  # RustDesk takes the machine uuid from /var/lib/dbus/machine-id; when it is empty the ID is never
+  # registered. Without root the file cannot be fixed, but RustDesk can be shown /etc/machine-id at
+  # that path through a private mount namespace (unshare -Urm, no root needed). The config is
+  # encrypted with a key derived from the uuid, so EVERY RustDesk process must go through the
+  # launcher below: one started outside it sees another uuid and rewrites the config (password lost).
+  local launcher="$base/rustdesk-run.sh" no_machine_id=""
   if [ ! -s /var/lib/dbus/machine-id ]; then
-    echo "WARNING: /var/lib/dbus/machine-id is empty or missing. Without it the ID will not be registered." >&2
-    echo "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" >&2
+    if [ -s /etc/machine-id ] && command -v unshare >/dev/null 2>&1 \
+        && unshare -Urm sh -c 'mount --bind /etc/machine-id /var/lib/dbus/machine-id' >/dev/null 2>&1; then
+      echo "NOTE: /var/lib/dbus/machine-id is empty. RustDesk is started in a private mount namespace"
+      echo "      where it points to /etc/machine-id (no root needed). Start RustDesk only via $launcher"
+    else
+      no_machine_id=1
+      echo "WARNING: /var/lib/dbus/machine-id is empty or missing. Without it the ID will not be registered." >&2
+      echo "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" >&2
+    fi
   fi
+  cat > "$launcher" <<EOF
+#!/bin/sh
+BIN='$bin'
+if [ ! -s /var/lib/dbus/machine-id ] && [ -s /etc/machine-id ] \\
+   && unshare -Urm sh -c 'mount --bind /etc/machine-id /var/lib/dbus/machine-id' >/dev/null 2>&1; then
+  exec unshare -Urm sh -c 'mount --bind /etc/machine-id /var/lib/dbus/machine-id && exec "\$0" "\$@"' "\$BIN" "\$@"
+fi
+exec "\$BIN" "\$@"
+EOF
+  chmod +x "$launcher"
 
   # RustDesk needs the X display of the graphical session. When the script runs without one
   # (for example over ssh), look for the session of this user: RUSTDESK_DISPLAY, then `who`,
@@ -225,15 +248,15 @@ install_user() {
 [Desktop Entry]
 Type=Application
 Name=RustDesk
-Exec=$bin --server
+Exec=$launcher --server
 X-GNOME-Autostart-enabled=true
 EOF
-  start_server "$bin" "$base"
+  start_server "$launcher" "$base"
 
   step "Getting the RustDesk ID"
   local rd_id="" i
   for i in $(seq 1 30); do
-    rd_id="$("$bin" --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
+    rd_id="$("$launcher" --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
     [[ "$rd_id" =~ ^[0-9]+$ ]] && break
     rd_id=""
     sleep 2
@@ -259,30 +282,31 @@ EOF
     echo "         Run the script again inside the desktop session or set RUSTDESK_DISPLAY=:N." >&2
   fi
 
-  # Right after the first registration the public server can assign a new ID (UUID_MISMATCH),
-  # so read the ID again once the server has had time to register.
-  sleep 10
-  local id2
-  id2="$("$bin" --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
-  if [[ "$id2" =~ ^[0-9]+$ ]] && [ "$id2" != "$rd_id" ]; then
-    echo "The ID was updated by the server: $rd_id -> $id2"
-    rd_id="$id2"
-  fi
-
   step "Setting the permanent password"
   local cfg="$HOME/.config/rustdesk/RustDesk.toml"
   [ -f "$cfg" ] || { echo "RustDesk config not found: $cfg" >&2; return 1; }
   stop_server "$base"
   set_config_password "$cfg" "$password"
-  start_server "$bin" "$base"
+  start_server "$launcher" "$base"
   sleep 8
   grep -q "^password = '.\+'" "$cfg" || { echo "The password is missing from $cfg after the restart." >&2; return 1; }
   pid="$(pgrep -u "$(id -u)" -f "$base/squashfs-root/.*rustdesk --server" | head -n1 || true)"
   [ -n "$pid" ] || { echo "ERROR: the RustDesk server did not come back after setting the password." >&2; return 1; }
   echo "Permanent password stored in $cfg, server running (PID $pid)."
 
+  # The public server can assign a new ID (UUID_MISMATCH) after a registration, and every server
+  # start registers again, so read the ID last, after the final restart.
+  step "Checking the final RustDesk ID"
+  sleep 12
+  local id2
+  id2="$("$launcher" --get-id 2>/dev/null | tail -n1 | tr -d '[:space:]')" || true
+  if [[ "$id2" =~ ^[0-9]+$ ]] && [ "$id2" != "$rd_id" ]; then
+    echo "The ID was updated by the server: $rd_id -> $id2"
+    rd_id="$id2"
+  fi
+
   printf 'ID: %s\nPassword: %s\n' "$rd_id" "$password" > "$CRED_FILE"
-  if [ ! -s /var/lib/dbus/machine-id ]; then
+  if [ -n "$no_machine_id" ]; then
     # Shown in the final summary too: without this the ID is not registered and nobody can connect.
     printf '%s\n%s\n%s\n' \
       "WARNING: this ID will NOT accept connections yet (/var/lib/dbus/machine-id is empty)." \
@@ -290,7 +314,7 @@ EOF
       "         then run this script again (the ID may change)." >> "$CRED_FILE"
   fi
   echo "RustDesk ${VERSION} installed (portable, user mode) in $base, ID: $rd_id"
-  echo "RustDesk window: $bin"
+  echo "RustDesk window (always start it via the launcher): $launcher"
 }
 
 # Everything below goes to the terminal and to the log. The final summary with the ID and
