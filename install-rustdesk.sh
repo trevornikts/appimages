@@ -170,6 +170,7 @@ install_root() {
   fi
 
   printf 'ID: %s\nPassword: %s\n' "$rd_id" "$password" > "$CRED_FILE"
+  chmod 644 "$CRED_FILE"   # plain document on purpose (the user asked for ordinary permissions)
   echo "RustDesk ${VERSION} installed (root mode), ID: $rd_id"
 }
 
@@ -321,6 +322,7 @@ EOF
       "         Ask an administrator to run: sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id" \
       "         then run this script again (the ID may change)." >> "$CRED_FILE"
   fi
+  chmod 644 "$CRED_FILE"   # plain document on purpose (the user asked for ordinary permissions)
   echo "RustDesk ${VERSION} installed (portable, user mode) in $base, ID: $rd_id"
   echo "RustDesk window (always start it via the launcher): $launcher"
 }
@@ -364,7 +366,7 @@ main() {
 # a transient systemd unit when possible, because logind kills plain background processes when an
 # ssh session ends.
 detach() {
-  local payload v how="" sargs=()
+  local payload v how="" linger="" sargs=()
   payload="$(mktemp "${TMPDIR:-/tmp}/rustdesk-install.XXXXXX.sh")"
   {
     echo 'rm -f -- "${BASH_SOURCE[0]}"'
@@ -376,6 +378,18 @@ detach() {
     done
     echo main
   } > "$payload"
+
+  # Without root the units live in the user's systemd manager, which logind stops (killing the
+  # install and the RustDesk server) when the last login session ends, unless "linger" is on.
+  # A normal user may enable linger for themselves (verified on Astra 1.8, no password asked).
+  if [ "$MODE" != root ] && command -v loginctl >/dev/null 2>&1 \
+      && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+    if loginctl enable-linger >/dev/null 2>&1; then
+      linger="NOTE: enabled 'linger' for $(id -un) so the install and RustDesk survive logout (undo: loginctl disable-linger)."
+    else
+      linger="WARNING: could not enable 'linger'. Do not log out until the log says Finished; after logout RustDesk may stop."
+    fi
+  fi
 
   if command -v systemd-run >/dev/null 2>&1; then
     [ "$MODE" = root ] || sargs=(--user)
@@ -390,6 +404,7 @@ detach() {
   fi
 
   echo "RustDesk install started in the background ($how)."
+  [ -z "$linger" ] || echo "$linger"
   echo "  Log:         $LOG"
   echo "  Follow:      tail -f $LOG"
   echo "  Credentials: $CRED_FILE (written at the end)"
