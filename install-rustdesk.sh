@@ -303,22 +303,65 @@ run() {
   if [ "$MODE" = root ]; then install_root; else install_user; fi
 }
 
-echo "Install log: $LOG"
-set +e
-run </dev/null 2>&1 | tee -a "$LOG"
-RC="${PIPESTATUS[0]}"
-set -e
+main() {
+  echo "Install log: $LOG"
+  set +e
+  run </dev/null 2>&1 | tee -a "$LOG"
+  RC="${PIPESTATUS[0]}"
+  set -e
 
-if [ "$RC" -ne 0 ]; then
-  echo "=== FAILED (exit code $RC) $(date '+%F %T') ===" >> "$LOG"
-  echo "Installation FAILED (exit code $RC). See the log: $LOG" >&2
-  exit "$RC"
-fi
+  if [ "$RC" -ne 0 ]; then
+    echo "=== FAILED (exit code $RC) $(date '+%F %T') ===" >> "$LOG"
+    echo "Installation FAILED (exit code $RC). See the log: $LOG" >&2
+    exit "$RC"
+  fi
 
-{
-  echo
-  echo "RustDesk installed ($MODE mode)."
-  sed 's/^/  /' "$CRED_FILE"
-  echo "(saved to $CRED_FILE; install log: $LOG)"
-  echo "=== Finished OK $(date '+%F %T') ==="
-} | tee -a "$LOG"
+  {
+    echo
+    echo "RustDesk installed ($MODE mode)."
+    sed 's/^/  /' "$CRED_FILE"
+    echo "(saved to $CRED_FILE; install log: $LOG)"
+    echo "=== Finished OK $(date '+%F %T') ==="
+  } | tee -a "$LOG"
+}
+
+# By default the install runs in the background and this command returns at once; read the log
+# afterwards. RUSTDESK_FOREGROUND=1 runs it in the terminal instead.
+# The background copy is a snapshot of the functions and variables of this shell written to a temp
+# file, so it also works for `curl | bash` (there is no script file to run again). It is started as
+# a transient systemd unit when possible, because logind kills plain background processes when an
+# ssh session ends.
+detach() {
+  local payload v how="" sargs=()
+  payload="$(mktemp "${TMPDIR:-/tmp}/rustdesk-install.XXXXXX.sh")"
+  {
+    echo 'rm -f -- "${BASH_SOURCE[0]}"'
+    echo 'set -euo pipefail'
+    declare -f
+    declare -p CURL MIRROR VERSION MODE CRED_FILE DEFAULT_LOG LOG
+    for v in $(compgen -v); do
+      case "$v" in RUSTDESK_*|DISPLAY|XAUTHORITY|XDG_STATE_HOME|TMPDIR) declare -p "$v" ;; esac
+    done
+    echo main
+  } > "$payload"
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    [ "$MODE" = root ] || sargs=(--user)
+    if systemd-run ${sargs[@]+"${sargs[@]}"} --quiet --collect --unit=rustdesk-install \
+        -p StandardOutput=null -p StandardError=null bash "$payload" >/dev/null 2>&1; then
+      how="systemd unit rustdesk-install"
+    fi
+  fi
+  if [ -z "$how" ]; then
+    nohup setsid bash "$payload" >/dev/null 2>&1 </dev/null &
+    how="background process (it may stop when this login session ends)"
+  fi
+
+  echo "RustDesk install started in the background ($how)."
+  echo "  Log:         $LOG"
+  echo "  Follow:      tail -f $LOG"
+  echo "  Credentials: $CRED_FILE (written at the end)"
+  echo "  The log ends with '=== Finished OK' or '=== FAILED'."
+}
+
+if [ -n "${RUSTDESK_FOREGROUND:-}" ]; then main; else detach; fi
